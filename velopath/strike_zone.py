@@ -1,0 +1,179 @@
+"""
+Strike Zone calibration and Automated Ball-Strike (ABS) umpiring evaluation.
+"""
+from dataclasses import dataclass
+from typing import Tuple, Optional
+
+PLATE_WIDTH_IN = 17.0  # zone width == plate width, so a zone's pixel width sets its px/in scale
+BALL_RADIUS_IN = 1.45  # regulation baseball, 2.9in diameter
+
+@dataclass
+class StrikeZone:
+    """Represents a 2D bounding box strike zone."""
+    x_min: float
+    y_min: float
+    x_max: float
+    y_max: float
+
+    @property
+    def width(self) -> float:
+        return self.x_max - self.x_min
+
+    @property
+    def height(self) -> float:
+        return self.y_max - self.y_min
+
+    @classmethod
+    def from_batter_height(
+        cls,
+        batter_height_inches: float,
+        home_plate_x: float,
+        home_plate_y: float,
+        pixels_per_inch: float = 2.5
+    ) -> "StrikeZone":
+        """
+        Calculates dynamic strike zone dimensions based on batter height.
+        MLB Rule 3.00:
+        Top: Midpoint between shoulders and pants top (~53.5% of height)
+        Bottom: Hollow beneath the kneecap (~27% of height)
+        Width: 17 inches across home plate.
+        """
+        width_px = PLATE_WIDTH_IN * pixels_per_inch
+        zone_height_in = (0.535 - 0.270) * batter_height_inches
+        height_px = zone_height_in * pixels_per_inch
+
+        x_min = home_plate_x - (width_px / 2.0)
+        x_max = home_plate_x + (width_px / 2.0)
+        
+        # y increases downwards in image coordinates
+        y_max = home_plate_y - (0.270 * batter_height_inches * pixels_per_inch)
+        y_min = y_max - height_px
+
+        return cls(x_min=x_min, y_min=y_min, x_max=x_max, y_max=y_max)
+
+    @classmethod
+    def from_plate_corners(
+        cls,
+        corner_a: Tuple[float, float],
+        corner_b: Tuple[float, float],
+        batter_height_inches: float = 72.0,
+    ) -> "StrikeZone":
+        """Zone over home plate from its two front corners as tapped on a frame (17in apart sets the scale)."""
+        (ax, ay), (bx, by) = corner_a, corner_b
+        ppi = ((bx - ax) ** 2 + (by - ay) ** 2) ** 0.5 / PLATE_WIDTH_IN
+        return cls.from_batter_height(batter_height_inches, (ax + bx) / 2.0, (ay + by) / 2.0, pixels_per_inch=ppi)
+
+    @classmethod
+    def get_preset_zone(
+        cls,
+        width: int,
+        height: int,
+        view_type: str = "auto",
+    ) -> "StrikeZone":
+        """Returns a rough starting zone for a camera perspective (user drags it onto the plate)."""
+        is_portrait = height > width
+        aspect = width / float(height)
+
+        # Uncalibrated starting guess per perspective; the pipeline makes no call from it.
+        if view_type in ["behind_plate", "behind_catcher"]:
+            cx = width * 0.68
+            cy = height * 0.58
+            zw = width * 0.16
+            zh = height * 0.22
+            return cls(
+                x_min=cx - (zw / 2.0),
+                y_min=cy - (zh / 2.0),
+                x_max=cx + (zw / 2.0),
+                y_max=cy + (zh / 2.0)
+            )
+        elif view_type == "behind_pitcher":
+            cx = width * 0.50 if is_portrait else (width * 0.65 if aspect > 1.3 else width * 0.50)
+            cy = height * 0.48 if is_portrait else height * 0.54
+            zw = width * 0.20 if is_portrait else width * 0.14
+            zh = height * 0.14 if is_portrait else height * 0.18
+            return cls(
+                x_min=cx - (zw / 2.0),
+                y_min=cy - (zh / 2.0),
+                x_max=cx + (zw / 2.0),
+                y_max=cy + (zh / 2.0)
+            )
+        elif view_type == "broadcast":
+            cx = width * 0.558
+            cy = height * 0.405
+            zw = width * 0.062
+            zh = height * 0.116
+            return cls(
+                x_min=cx - (zw / 2.0),
+                y_min=cy - (zh / 2.0),
+                x_max=cx + (zw / 2.0),
+                y_max=cy + (zh / 2.0)
+            )
+        else:
+            cx = width * 0.60 if aspect > 1.3 else width * 0.50
+            cy = height * 0.54
+            zw = width * 0.16
+            zh = height * 0.18
+            return cls(
+                x_min=cx - (zw / 2.0),
+                y_min=cy - (zh / 2.0),
+                x_max=cx + (zw / 2.0),
+                y_max=cy + (zh / 2.0)
+            )
+
+
+@dataclass
+class PitchCallResult:
+    """Result of strike zone evaluation."""
+    is_strike: bool
+    call: str  # "STRIKE" or "BALL"
+    plate_x: float
+    plate_y: float
+    zone_x_min: float
+    zone_y_min: float
+    zone_x_max: float
+    zone_y_max: float
+    dist_to_center_in: float
+
+
+def evaluate_pitch(
+    plate_cross_point: Tuple[float, float],
+    strike_zone: StrikeZone,
+    ball_radius: Optional[float] = None,
+) -> PitchCallResult:
+    """
+    Evaluates whether a pitch crossing the plate is a STRIKE or a BALL.
+    According to official ABS rules: if ANY part of the baseball intersects
+    the strike zone box (including the ball radius buffer), it is a STRIKE.
+    Scale comes from the zone itself (17in wide); ball_radius defaults to a baseball at that scale.
+    """
+    bx, by = plate_cross_point
+    pixels_per_inch = max(strike_zone.width, 1e-6) / PLATE_WIDTH_IN
+    if ball_radius is None:
+        ball_radius = BALL_RADIUS_IN * pixels_per_inch
+
+    # Expanded zone by ball radius for full intersection check
+    eff_x_min = strike_zone.x_min - ball_radius
+    eff_x_max = strike_zone.x_max + ball_radius
+    eff_y_min = strike_zone.y_min - ball_radius
+    eff_y_max = strike_zone.y_max + ball_radius
+
+    is_strike = (eff_x_min <= bx <= eff_x_max) and (eff_y_min <= by <= eff_y_max)
+    call = "STRIKE" if is_strike else "BALL"
+
+    # Distance to center in inches
+    center_x = (strike_zone.x_min + strike_zone.x_max) / 2.0
+    center_y = (strike_zone.y_min + strike_zone.y_max) / 2.0
+    dist_px = ((bx - center_x) ** 2 + (by - center_y) ** 2) ** 0.5
+    dist_in = round(float(dist_px / pixels_per_inch), 1)
+
+    return PitchCallResult(
+        is_strike=is_strike,
+        call=call,
+        plate_x=bx,
+        plate_y=by,
+        zone_x_min=strike_zone.x_min,
+        zone_y_min=strike_zone.y_min,
+        zone_x_max=strike_zone.x_max,
+        zone_y_max=strike_zone.y_max,
+        dist_to_center_in=dist_in,
+    )

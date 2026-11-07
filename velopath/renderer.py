@@ -1,0 +1,619 @@
+"""
+Pitch Lab visual renderer: Glowing trajectory ribbon, strike zone overlay, and HUD cards.
+Refined for dynamic scaling across both portrait smartphone (384px) and 1080p widescreen formats.
+"""
+import os
+import subprocess
+from typing import List, Tuple, Optional
+import cv2
+import numpy as np
+from velopath.tracker import TrajectoryPoint
+from velopath.strike_zone import StrikeZone, PitchCallResult
+
+
+GRAPHIC_THEMES = {
+    "statcast_cyan": {
+        "name": "Statcast 3D Cyan",
+        "primary": (255, 230, 0),      # BGR: Electric Cyan (#00E5FF)
+        "glow": (240, 150, 0),         # BGR: Cyan Glow Bloom
+        "core": (255, 255, 255),       # Pure White Laser Core
+    },
+    "neon_gold": {
+        "name": "VeloPath Neon Gold",
+        "primary": (0, 215, 255),      # BGR: Bright Gold (#FFD700)
+        "glow": (0, 130, 255),         # BGR: Warm Amber Glow
+        "core": (255, 255, 255),
+    },
+    "electric_violet": {
+        "name": "Electric Violet",
+        "primary": (251, 64, 224),     # BGR: Neon Violet (#E040FB)
+        "glow": (200, 20, 160),        # BGR: Deep Purple
+        "core": (255, 255, 255),
+    },
+    "laser_emerald": {
+        "name": "Laser Emerald",
+        "primary": (118, 230, 0),      # BGR: Spring Green (#00E676)
+        "glow": (50, 180, 0),
+        "core": (255, 255, 255),
+    }
+}
+
+
+
+def output_size(in_w: int, in_h: int, max_dimension: Optional[int]) -> Tuple[int, int]:
+    """Rendered frame size: source size, or scaled so the long side is max_dimension (even, for H.264)."""
+    if not max_dimension or max(in_w, in_h) <= max_dimension:
+        return in_w, in_h
+    scale = max_dimension / float(max(in_w, in_h))
+    out_w, out_h = int(round(in_w * scale)), int(round(in_h * scale))
+    return out_w - out_w % 2, out_h - out_h % 2
+
+class PitchRenderer:
+    """
+    Renders high-definition Statcast 3D trajectory streamline graphics,
+    broadcast-accurate strike zone box, and bottom telemetry HUD card onto video frames.
+    """
+    def __init__(
+        self,
+        ribbon_color: Optional[Tuple[int, int, int]] = None,
+        glow_color: Optional[Tuple[int, int, int]] = None,
+        graphic_style: str = "statcast_cyan",
+        max_trail_length: Optional[int] = None,
+    ):
+        theme = GRAPHIC_THEMES.get(graphic_style, GRAPHIC_THEMES["statcast_cyan"])
+        self.graphic_style = graphic_style
+        self.ribbon_color = ribbon_color or theme["primary"]
+        self.glow_color = glow_color or theme["glow"]
+        self.core_color = theme.get("core", (255, 255, 255))
+        self.max_trail_length = max_trail_length
+
+    def set_graphic_style(self, style_name: str) -> None:
+        """Dynamically switch graphic theme."""
+        theme = GRAPHIC_THEMES.get(style_name, GRAPHIC_THEMES["statcast_cyan"])
+        self.graphic_style = style_name
+        self.ribbon_color = theme["primary"]
+        self.glow_color = theme["glow"]
+        self.core_color = theme.get("core", (255, 255, 255))
+
+    def draw_glowing_ribbon(
+        self,
+        frame: np.ndarray,
+        points: List[TrajectoryPoint],
+        current_frame_idx: int,
+    ) -> np.ndarray:
+        """
+        Renders a slim, aerodynamic Statcast 3D laser streamline with multi-layer
+        emissive bloom, white-hot center laser core, and glowing baseball marker.
+        """
+        if frame is None:
+            return frame
+        frame_map = {}
+        for p in points:
+            if p.frame_idx <= current_frame_idx and (p.frame_idx not in frame_map or p.conf >= frame_map[p.frame_idx].conf):
+                frame_map[p.frame_idx] = p
+        if len(frame_map) < 2:
+            return frame
+
+        unique_pts = [frame_map[f] for f in sorted(frame_map.keys())]
+        h, w = frame.shape[:2]
+
+        frames = np.array([p.frame_idx for p in unique_pts], dtype=float)
+        xs = np.array([p.x for p in unique_pts], dtype=float)
+        ys = np.array([p.y for p in unique_pts], dtype=float)
+
+        # High-resolution monotonic spline interpolation (PCHIP eliminates ringing and overshoot)
+        try:
+            from scipy.interpolate import PchipInterpolator
+            if len(frames) >= 3:
+                cs_x = PchipInterpolator(frames, xs, extrapolate=True)
+                cs_y = PchipInterpolator(frames, ys, extrapolate=True)
+            else:
+                from scipy.interpolate import interp1d
+                cs_x = interp1d(frames, xs, kind='linear', fill_value="extrapolate")
+                cs_y = interp1d(frames, ys, kind='linear', fill_value="extrapolate")
+        except Exception:
+            from scipy.interpolate import interp1d
+            cs_x = interp1d(frames, xs, kind='linear', fill_value="extrapolate")
+            cs_y = interp1d(frames, ys, kind='linear', fill_value="extrapolate")
+
+        curr_end_f = min(current_frame_idx, unique_pts[-1].frame_idx)
+        n_samples = max(30, int((curr_end_f - frames[0] + 1) * 14))
+        sub_t = np.linspace(frames[0], curr_end_f, n_samples)
+        sub_x = cs_x(sub_t)
+        sub_y = cs_y(sub_t)
+
+        curve_pts = np.vstack([sub_x, sub_y]).T
+        dx = np.gradient(curve_pts[:, 0])
+        dy = np.gradient(curve_pts[:, 1])
+        norms = np.sqrt(dx**2 + dy**2)
+        dx /= np.maximum(norms, 1e-6)
+        dy /= np.maximum(norms, 1e-6)
+        nx, ny = -dy, dx
+
+        # Realistic Statcast streamline radius: slim at release, matching baseball radius at plate
+        scale = max(0.4, min(1.2, w / 1600.0))
+        radii = np.linspace(1.8 * scale, 5.5 * scale, len(curve_pts))
+        left_edge = curve_pts + np.stack([nx, ny], axis=1) * radii[:, None]
+        right_edge = curve_pts - np.stack([nx, ny], axis=1) * radii[:, None]
+
+        # Bounding box for ribbon glow and body to eliminate whole-frame copies & blur
+        pad = int(12 * scale) + 16
+        min_x = max(0, int(np.min(curve_pts[:, 0])) - pad)
+        max_x = min(w, int(np.max(curve_pts[:, 0])) + pad)
+        min_y = max(0, int(np.min(curve_pts[:, 1])) - pad)
+        max_y = min(h, int(np.max(curve_pts[:, 1])) + pad)
+
+        if max_x > min_x and max_y > min_y:
+            roi = frame[min_y:max_y, min_x:max_x]
+            offset = np.array([min_x, min_y])
+
+            # 1. Outer Bloom Glow Layer (soft ambient illumination)
+            bloom_w = radii[:, None] + (4.0 * scale)
+            bloom_poly = np.vstack([
+                curve_pts + np.stack([nx, ny], axis=1) * bloom_w,
+                (curve_pts - np.stack([nx, ny], axis=1) * bloom_w)[::-1]
+            ]) - offset
+            bloom_overlay = np.zeros_like(roi)
+            cv2.fillPoly(bloom_overlay, [bloom_poly.astype(np.int32)], self.glow_color)
+            bloom_blurred = cv2.GaussianBlur(bloom_overlay, (15, 15), 0)
+            roi = cv2.addWeighted(bloom_blurred, 0.45, roi, 1.0, 0)
+
+            # 2. Sleek Semi-Translucent Streamline Body
+            body_overlay = roi.copy()
+            tube_poly = np.vstack([left_edge, right_edge[::-1]]) - offset
+            cv2.fillPoly(body_overlay, [tube_poly.astype(np.int32)], self.ribbon_color)
+            frame[min_y:max_y, min_x:max_x] = cv2.addWeighted(body_overlay, 0.40, roi, 0.60, 0)
+
+        # 3. Dual Anti-Aliased Boundary Rails
+        line_w = max(1, int(1.2 * scale))
+        cv2.polylines(frame, [left_edge.astype(np.int32)], False, self.ribbon_color, line_w, lineType=cv2.LINE_AA)
+        cv2.polylines(frame, [right_edge.astype(np.int32)], False, self.ribbon_color, line_w, lineType=cv2.LINE_AA)
+
+        # 4. Hyper-Bright Laser Core Line down the center
+        core_pts = curve_pts.astype(np.int32)
+        cv2.polylines(frame, [core_pts], False, self.core_color, max(1, int(1.6 * scale)), lineType=cv2.LINE_AA)
+
+        # 5. Glowing 3D Ball Marker with luminous aura
+        curr_head = (int(curve_pts[-1, 0]), int(curve_pts[-1, 1]))
+        ball_r = max(4, int(radii[-1] + 1.5))
+        aura_r = ball_r + int(5 * scale)
+        bx1 = max(0, curr_head[0] - aura_r)
+        bx2 = min(w, curr_head[0] + aura_r + 1)
+        by1 = max(0, curr_head[1] - aura_r)
+        by2 = min(h, curr_head[1] + aura_r + 1)
+        if bx2 > bx1 and by2 > by1:
+            aura_sub = frame[by1:by2, bx1:bx2]
+            aura_overlay = aura_sub.copy()
+            cv2.circle(aura_overlay, (curr_head[0] - bx1, curr_head[1] - by1), aura_r, self.glow_color, -1, lineType=cv2.LINE_AA)
+            frame[by1:by2, bx1:bx2] = cv2.addWeighted(aura_overlay, 0.40, aura_sub, 0.60, 0)
+
+        # Main ball sphere
+        cv2.circle(frame, curr_head, ball_r, (255, 255, 255), -1, lineType=cv2.LINE_AA)
+        cv2.circle(frame, curr_head, ball_r, self.ribbon_color, max(1, int(1.2 * scale)), lineType=cv2.LINE_AA)
+
+        return frame
+
+    def draw_strike_zone(
+        self,
+        frame: np.ndarray,
+        strike_zone: StrikeZone,
+        call_result: Optional[PitchCallResult] = None
+    ) -> np.ndarray:
+        """
+        Renders a sleek, modern broadcast-style strike zone (Apple TV / ESPN K-Zone aesthetic)
+        with thin anti-aliased border, corner brackets, and subtle 3x3 dashed grid.
+        """
+        if frame is None:
+            return frame
+        x1, y1 = int(round(strike_zone.x_min)), int(round(strike_zone.y_min))
+        x2, y2 = int(round(strike_zone.x_max)), int(round(strike_zone.y_max))
+        w = x2 - x1
+        h = y2 - y1
+        if w <= 0 or h <= 0:
+            return frame
+
+        if call_result:
+            theme_color = (0, 230, 118) if call_result.is_strike else (60, 60, 255)
+        else:
+            theme_color = (255, 220, 0)
+
+        # 1. Soft Translucent Fill (8% opacity so players behind are crystal clear)
+        sub = frame[y1:y2, x1:x2]
+        rect_overlay = sub.copy()
+        cv2.rectangle(rect_overlay, (0, 0), (w, h), theme_color, -1)
+        frame[y1:y2, x1:x2] = cv2.addWeighted(rect_overlay, 0.08, sub, 0.92, 0)
+
+        # 2. Sleek 1px Anti-Aliased Outer Border
+        cv2.rectangle(frame, (x1, y1), (x2, y2), theme_color, 1, lineType=cv2.LINE_AA)
+
+        # 3. High-Tech Corner Brackets
+        corner_len = max(8, int(min(w, h) * 0.18))
+        bw = 2
+        # Top-left
+        cv2.line(frame, (x1, y1), (x1 + corner_len, y1), theme_color, bw, lineType=cv2.LINE_AA)
+        cv2.line(frame, (x1, y1), (x1, y1 + corner_len), theme_color, bw, lineType=cv2.LINE_AA)
+        # Top-right
+        cv2.line(frame, (x2, y1), (x2 - corner_len, y1), theme_color, bw, lineType=cv2.LINE_AA)
+        cv2.line(frame, (x2, y1), (x2, y1 + corner_len), theme_color, bw, lineType=cv2.LINE_AA)
+        # Bottom-left
+        cv2.line(frame, (x1, y2), (x1 + corner_len, y2), theme_color, bw, lineType=cv2.LINE_AA)
+        cv2.line(frame, (x1, y2), (x1, y2 - corner_len), theme_color, bw, lineType=cv2.LINE_AA)
+        # Bottom-right
+        cv2.line(frame, (x2, y2), (x2 - corner_len, y2), theme_color, bw, lineType=cv2.LINE_AA)
+        cv2.line(frame, (x2, y2), (x2, y2 - corner_len), theme_color, bw, lineType=cv2.LINE_AA)
+
+        # 4. Subtle 3x3 Inner Grid
+        grid_sub = frame[y1:y2, x1:x2]
+        grid_overlay = grid_sub.copy()
+        for i in [1, 2]:
+            gx = int(i * w / 3)
+            gy = int(i * h / 3)
+            cv2.line(grid_overlay, (gx, 0), (gx, h), (240, 240, 240), 1, lineType=cv2.LINE_AA)
+            cv2.line(grid_overlay, (0, gy), (w, gy), (240, 240, 240), 1, lineType=cv2.LINE_AA)
+        frame[y1:y2, x1:x2] = cv2.addWeighted(grid_overlay, 0.35, grid_sub, 0.65, 0)
+
+        return frame
+
+    def draw_hud_card(
+        self,
+        frame: np.ndarray,
+        pitch_number: int,
+        velocity_mph: float,
+        vert_break_in: float,
+        horz_break_in: float,
+        call_result: Optional[PitchCallResult] = None,
+        pitch_tag: str = "Dropball",
+        flight_time_ms: Optional[float] = None,
+    ) -> np.ndarray:
+        """
+        Renders the signature Pitch Lab telemetric HUD card with
+        responsive scaling and layout for both widescreen broadcast and mobile formats.
+        """
+        if frame is None:
+            return frame
+        h, w = frame.shape[:2]
+        is_widescreen = (w / float(h)) > 1.3
+        scale = max(0.65, min(1.8, w / 600.0))
+
+        if is_widescreen:
+            # Compact sleek card in bottom-left so home plate & batter remain visible
+            card_w = int(min(420, w * 0.35))
+            card_h = int(min(115, h * 0.16))
+            card_x1 = 20
+            card_y1 = h - card_h - 20
+            card_x2 = card_x1 + card_w
+            card_y2 = card_y1 + card_h
+
+            card_sub = frame[card_y1:card_y2, card_x1:card_x2]
+            overlay = card_sub.copy()
+            cv2.rectangle(overlay, (0, 0), (card_w, card_h), (18, 18, 18), -1)
+            frame[card_y1:card_y2, card_x1:card_x2] = cv2.addWeighted(overlay, 0.90, card_sub, 0.10, 0)
+            cv2.rectangle(frame, (card_x1, card_y1), (card_x2, card_y2), (55, 55, 55), 1)
+
+            font = cv2.FONT_HERSHEY_SIMPLEX
+
+            # Title & Badge
+            cv2.putText(frame, f"Pitch #{pitch_number}", (card_x1 + 14, card_y1 + 26), font, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
+            badge_text = call_result.call if call_result else pitch_tag
+            badge_color = (0, 230, 118) if (call_result and call_result.is_strike) else ((60, 60, 255) if call_result else (0, 190, 255))
+            badge_size = cv2.getTextSize(badge_text, font, 0.5, 2)[0]
+            bx2 = card_x2 - 12
+            bx1 = bx2 - badge_size[0] - 12
+            by1 = card_y1 + 8
+            by2 = by1 + badge_size[1] + 10
+            cv2.rectangle(frame, (bx1, by1), (bx2, by2), (35, 35, 35), -1)
+            cv2.rectangle(frame, (bx1, by1), (bx2, by2), badge_color, 1)
+            cv2.putText(frame, badge_text, (bx1 + 6, by2 - 4), font, 0.5, badge_color, 2, cv2.LINE_AA)
+
+            # Velocity
+            cv2.putText(frame, "Velocity", (card_x1 + 14, card_y1 + 50), font, 0.40, (160, 160, 160), 1, cv2.LINE_AA)
+            vel_text = f"{velocity_mph:.1f}"
+            cv2.putText(frame, vel_text, (card_x1 + 14, card_y1 + 90), font, 1.1, (255, 255, 255), 2, cv2.LINE_AA)
+            vel_w = cv2.getTextSize(vel_text, font, 1.1, 2)[0][0]
+            cv2.putText(frame, " mph", (card_x1 + 14 + vel_w + 3, card_y1 + 90), font, 0.48, (180, 180, 180), 1, cv2.LINE_AA)
+
+            # Right columns
+            r_col = card_x1 + int(card_w * 0.54)
+            cv2.putText(frame, "Flight", (r_col, card_y1 + 50), font, 0.38, (160, 160, 160), 1, cv2.LINE_AA)
+            flight_str = f"{flight_time_ms:.0f} ms" if flight_time_ms else "400 ms"
+            cv2.putText(frame, flight_str, (r_col, card_y1 + 84), font, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
+
+            r_col2 = r_col + int((card_x2 - r_col) * 0.52)
+            cv2.putText(frame, "Break", (r_col2, card_y1 + 50), font, 0.38, (160, 160, 160), 1, cv2.LINE_AA)
+            cv2.putText(frame, f"{vert_break_in:+.1f}\"", (r_col2, card_y1 + 84), font, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
+            return frame
+
+        card_h = int(min(150, h * 0.20))
+        card_w = int(w * 0.94)
+        card_x1 = int((w - card_w) / 2)
+        card_y1 = h - card_h - 16
+        card_x2 = card_x1 + card_w
+        card_y2 = card_y1 + card_h
+
+        card_sub = frame[card_y1:card_y2, card_x1:card_x2]
+        overlay = card_sub.copy()
+        cv2.rectangle(overlay, (0, 0), (card_w, card_h), (18, 18, 18), -1)
+        frame[card_y1:card_y2, card_x1:card_x2] = cv2.addWeighted(overlay, 0.90, card_sub, 0.10, 0)
+        cv2.rectangle(frame, (card_x1, card_y1), (card_x2, card_y2), (55, 55, 55), 1)
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+
+        # Row 1: Title & Badge
+        pitch_title = f"Pitch #{pitch_number}"
+        cv2.putText(frame, pitch_title, (card_x1 + 12, card_y1 + int(28 * scale)), font, 0.6 * scale, (255, 255, 255), 2, cv2.LINE_AA)
+
+        badge_text = call_result.call if call_result else pitch_tag
+        badge_color = (0, 230, 118) if (call_result and call_result.is_strike) else ((60, 60, 255) if call_result else (0, 190, 255))
+
+        badge_size = cv2.getTextSize(badge_text, font, 0.5 * scale, 2)[0]
+        bx2 = card_x2 - 12
+        bx1 = bx2 - badge_size[0] - 14
+        by1 = card_y1 + 10
+        by2 = by1 + badge_size[1] + 12
+        cv2.rectangle(frame, (bx1, by1), (bx2, by2), (35, 35, 35), -1)
+        cv2.rectangle(frame, (bx1, by1), (bx2, by2), badge_color, 1)
+        cv2.putText(frame, badge_text, (bx1 + 7, by2 - 4), font, 0.5 * scale, badge_color, 2, cv2.LINE_AA)
+
+        # Row 2: Velocity
+        cv2.putText(frame, "Velocity", (card_x1 + 12, card_y1 + int(52 * scale)), font, 0.4 * scale, (160, 160, 160), 1, cv2.LINE_AA)
+
+        vel_text = f"{velocity_mph:.1f}"
+        cv2.putText(frame, vel_text, (card_x1 + 12, card_y1 + int(94 * scale)), font, 1.0 * scale, (255, 255, 255), 2, cv2.LINE_AA)
+        vel_w = cv2.getTextSize(vel_text, font, 1.0 * scale, 2)[0][0]
+        cv2.putText(frame, " mph", (card_x1 + 12 + vel_w + 3, card_y1 + int(94 * scale)), font, 0.45 * scale, (180, 180, 180), 1, cv2.LINE_AA)
+
+        # Row 3: Right Columns - Vert, Horz, Flight
+        col_x = card_x1 + int(card_w * 0.48)
+        col_spacing = int((card_x2 - col_x) / 3)
+
+        # Vert
+        cv2.putText(frame, "Vert", (col_x, card_y1 + int(56 * scale)), font, 0.36 * scale, (150, 150, 150), 1, cv2.LINE_AA)
+        cv2.putText(frame, f"{vert_break_in:+.1f} in", (col_x, card_y1 + int(86 * scale)), font, 0.42 * scale, (255, 255, 255), 1, cv2.LINE_AA)
+
+        # Horz
+        cv2.putText(frame, "Horz", (col_x + col_spacing, card_y1 + int(56 * scale)), font, 0.36 * scale, (150, 150, 150), 1, cv2.LINE_AA)
+        cv2.putText(frame, f"{horz_break_in:+.1f} in", (col_x + col_spacing, card_y1 + int(86 * scale)), font, 0.42 * scale, (255, 255, 255), 1, cv2.LINE_AA)
+
+        # Flight
+        flight_str = f"{flight_time_ms:.0f} ms" if flight_time_ms else "450 ms"
+        cv2.putText(frame, "Flight", (col_x + col_spacing * 2, card_y1 + int(56 * scale)), font, 0.36 * scale, (150, 150, 150), 1, cv2.LINE_AA)
+        cv2.putText(frame, flight_str, (col_x + col_spacing * 2, card_y1 + int(86 * scale)), font, 0.42 * scale, (255, 255, 255), 1, cv2.LINE_AA)
+
+        return frame
+
+    def draw_minimal_badge(
+        self,
+        frame: np.ndarray,
+        velocity_mph: float,
+        call_result: Optional[PitchCallResult] = None,
+        pitch_tag: str = "Fastball",
+    ) -> np.ndarray:
+        """
+        Draws an ultra-sleek, non-intrusive broadcast badge in the top-right corner.
+        Takes up only 32px height, never obscuring the pitcher, home plate, or ball flight.
+        """
+        if frame is None:
+            return frame
+        h, w = frame.shape[:2]
+        badge_text = f"{velocity_mph:.1f} MPH  |  {pitch_tag.upper()}"
+        call_text = call_result.call if call_result else ""
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.52
+        thickness = 1
+
+        (text_w, text_h), _ = cv2.getTextSize(badge_text, font, font_scale, thickness)
+        call_w = 0
+        if call_text:
+            (call_w, _), _ = cv2.getTextSize(call_text, font, 0.50, 2)
+            call_w += 16
+
+        pad_x = 14
+        badge_w = text_w + call_w + (pad_x * 2)
+        badge_h = 32
+        x1 = w - badge_w - 20
+        y1 = 20
+        x2 = x1 + badge_w
+        y2 = y1 + badge_h
+
+        # Translucent background pill
+        pill_sub = frame[y1:y2, x1:x2]
+        pill_overlay = pill_sub.copy()
+        cv2.rectangle(pill_overlay, (0, 0), (badge_w, badge_h), (15, 20, 28), -1)
+        frame[y1:y2, x1:x2] = cv2.addWeighted(pill_overlay, 0.85, pill_sub, 0.15, 0)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (55, 65, 81), 1)
+
+        # Metric text
+        cv2.putText(frame, badge_text, (x1 + pad_x, y1 + 21), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
+
+        # Call tag
+        if call_text:
+            is_strike = call_result.is_strike if call_result else False
+            c_color = (0, 230, 118) if is_strike else (60, 60, 255)
+            cx1 = x2 - call_w - 6
+            cx2 = x2 - 8
+            cy1 = y1 + 5
+            cy2 = y2 - 5
+            cv2.rectangle(frame, (cx1, cy1), (cx2, cy2), (24, 30, 42), -1)
+            cv2.rectangle(frame, (cx1, cy1), (cx2, cy2), c_color, 1)
+            cv2.putText(frame, call_text, (cx1 + 6, cy2 - 5), font, 0.44, c_color, 1, cv2.LINE_AA)
+
+        return frame
+
+    def render_complete_video(
+        self,
+        input_video_path: str,
+        output_video_path: str,
+        trajectory_points: List[TrajectoryPoint],
+        velocity_mph: float,
+        vert_break_in: float,
+        horz_break_in: float,
+        strike_zone: Optional[StrikeZone] = None,
+        call_result: Optional[PitchCallResult] = None,
+        pitch_number: int = 1,
+        pitch_tag: str = "Dropball",
+        flight_time_ms: Optional[float] = None,
+        show_strike_zone: bool = True,
+        graphic_style: str = "statcast_cyan",
+        trim_to_pitch: bool = False,
+        hud_style: str = "none",
+        max_dimension: Optional[int] = 1920,
+    ) -> Tuple[int, int]:
+        """
+        Renders the complete Pitch Lab video with Statcast 3D trajectory streamline,
+        clean unobscured field, and broadcast strike zone box.
+        hud_style options:
+          - 'none': Clean video with zero field obstruction (recommended, telemetry in web UI)
+          - 'minimal_badge': Tiny 32px broadcast badge in top corner
+          - 'classic_card': Large bottom card
+        max_dimension:
+          - Optional maximum dimension (e.g. 1920 for 1080p, 1280 for 720p).
+            If video exceeds max_dimension, frames and overlays are scaled down proportionally.
+        """
+        if graphic_style:
+            self.set_graphic_style(graphic_style)
+        cap = cv2.VideoCapture(input_video_path)
+        if not cap.isOpened():
+            raise FileNotFoundError(f"Input video not found: {input_video_path}")
+
+        fps = cap.get(cv2.CAP_PROP_FPS) or 60.0
+        in_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        in_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total_in_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+        # Overlays arrive in source pixels; map them onto the (possibly downscaled) output frame
+        out_w, out_h = output_size(in_w, in_h, max_dimension)
+        scale = out_w / float(in_w) if in_w > 0 else 1.0
+        scale_x, scale_y = scale, (out_h / float(in_h) if in_h > 0 else 1.0)
+
+        render_points = [
+            TrajectoryPoint(frame_idx=p.frame_idx, x=p.x * scale_x, y=p.y * scale_y, conf=p.conf, radius=p.radius * scale)
+            for p in trajectory_points
+        ]
+        render_sz = strike_zone and StrikeZone(
+            x_min=strike_zone.x_min * scale_x,
+            y_min=strike_zone.y_min * scale_y,
+            x_max=strike_zone.x_max * scale_x,
+            y_max=strike_zone.y_max * scale_y,
+        )
+
+        # Action-window trimming: if enabled, render active pitch + 0.4s lead-in/follow-through
+        if trim_to_pitch and trajectory_points and len(trajectory_points) >= 2:
+            lead = int(round(fps * 0.4))
+            start_frame_export = max(0, trajectory_points[0].frame_idx - lead)
+            end_frame_export = min(total_in_frames, trajectory_points[-1].frame_idx + lead)
+            if start_frame_export >= end_frame_export:
+                start_frame_export = 0
+                end_frame_export = total_in_frames
+        else:
+            start_frame_export = 0
+            end_frame_export = total_in_frames
+
+        # Try fast single-pass direct pipe to ffmpeg stdin
+        ffmpeg_proc = None
+        out = None
+        try:
+            import imageio_ffmpeg
+            ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+            cmd = [
+                ffmpeg_exe, "-y",
+                "-f", "rawvideo",
+                "-vcodec", "rawvideo",
+                "-s", f"{out_w}x{out_h}",
+                "-pix_fmt", "bgr24",
+                "-r", f"{fps}",
+                "-i", "-",
+                "-c:v", "libx264",
+                "-pix_fmt", "yuv420p",
+                "-preset", "ultrafast",
+                "-tune", "zerolatency",
+                "-movflags", "+faststart",
+                output_video_path
+            ]
+            ffmpeg_proc = subprocess.Popen(
+                cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+        except Exception:
+            ffmpeg_proc = None
+
+        if ffmpeg_proc is None:
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            out = cv2.VideoWriter(output_video_path, fourcc, fps, (out_w, out_h))
+
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame_export)
+        frame_idx = start_frame_export
+        while frame_idx < end_frame_export:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            if scale != 1.0:
+                frame = cv2.resize(frame, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
+
+            # 1. Strike Zone overlay
+            if show_strike_zone and render_sz:
+                frame = self.draw_strike_zone(frame, render_sz, call_result)
+
+            # 2. Glowing trajectory ribbon
+            frame = self.draw_glowing_ribbon(frame, render_points, frame_idx)
+
+            # 3. Optional HUD Overlay (Default 'none' leaves field 100% unobstructed)
+            if hud_style == "minimal_badge":
+                if render_points and frame_idx >= render_points[0].frame_idx:
+                    frame = self.draw_minimal_badge(
+                        frame=frame,
+                        velocity_mph=velocity_mph,
+                        call_result=call_result,
+                        pitch_tag=pitch_tag,
+                    )
+            elif hud_style == "classic_card":
+                if render_points and frame_idx >= render_points[0].frame_idx:
+                    frame = self.draw_hud_card(
+                        frame=frame,
+                        pitch_number=pitch_number,
+                        velocity_mph=velocity_mph,
+                        vert_break_in=vert_break_in,
+                        horz_break_in=horz_break_in,
+                        call_result=call_result,
+                        pitch_tag=pitch_tag,
+                        flight_time_ms=flight_time_ms,
+                    )
+
+            if ffmpeg_proc and ffmpeg_proc.stdin:
+                ffmpeg_proc.stdin.write(frame.tobytes())
+            elif out:
+                out.write(frame)
+
+            frame_idx += 1
+
+        cap.release()
+        if ffmpeg_proc and ffmpeg_proc.stdin:
+            ffmpeg_proc.stdin.close()
+            ffmpeg_proc.wait()
+        elif out:
+            out.release()
+            self._convert_to_web_h264(output_video_path)
+
+        return (out_w, out_h)
+
+    def _convert_to_web_h264(self, video_path: str) -> None:
+        try:
+            import imageio_ffmpeg
+            ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+            temp_path = video_path + ".tmp.mp4"
+            cmd = [
+                ffmpeg_exe, "-y",
+                "-i", video_path,
+                "-c:v", "libx264",
+                "-pix_fmt", "yuv420p",
+                "-preset", "ultrafast",
+                "-movflags", "+faststart",
+                temp_path
+            ]
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if os.path.exists(temp_path):
+                if os.path.exists(video_path):
+                    os.remove(video_path)
+                os.rename(temp_path, video_path)
+        except Exception as e:
+            print(f"[PitchRenderer] Web H264 conversion note: {e}")

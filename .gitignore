@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# Large video / media files
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# Large ML model files
+*.pt
+*.pth
+*.onnx
+
+# Model split files
+*.pt.part*
+*.pth.part*
+
+# Local/runtime files
+*.log
+.env
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/

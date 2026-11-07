@@ -1,0 +1,365 @@
+/* ==========================================================================
+   VeloPath AI - Professional Sports Technology & Telemetry Cockpit
+   Design Standard: TrackMan Baseball / MLB Statcast / Apple Sports Pro / Linear
+   ========================================================================== */
+
+:root {
+    /* 1. Neutral Obsidian & Titanium Substrates (Luminance Staged, Saturation < 3%) */
+    --pitch-black: #050608;
+    --pitch-surface: #0C0F15;
+    --pitch-card: #121620;
+    --pitch-card-elevated: #171D2A;
+    --pitch-card-inner: #080A0E;
+
+    /* Legacy compatibility aliases */
+    --bg-main: var(--pitch-black);
+    --bg-surface: var(--pitch-surface);
+    --bg-card: var(--pitch-card);
+
+    /* 2. Precision Translucent Hairline Borders & Specular Edge Reflection */
+    --border-subtle: rgba(255, 255, 255, 0.07);
+    --border-pro: rgba(255, 255, 255, 0.12);
+    --border-elevated: rgba(255, 255, 255, 0.18);
+    --border-focus: rgba(0, 229, 255, 0.55);
+    --specular-top: inset 0 1px 0 0 rgba(255, 255, 255, 0.07);
+
+    /* 3. High-Contrast Sports Visualization Accents (WCAG AAA Calibrated) */
+    --statcast-cyan: #00E5FF;
+    --statcast-cyan-dim: rgba(0, 229, 255, 0.10);
+    --strike-red: #FF3B53;
+    --strike-red-dim: rgba(255, 59, 83, 0.12);
+    --ball-green: #00E676;
+    --ball-green-dim: rgba(0, 230, 118, 0.12);
+    --velocity-amber: #FFB800;
+    --velocity-amber-dim: rgba(255, 184, 0, 0.12);
+    --diamond-gold: #F59E0B;
+    --laser-violet: #8B5CF6;
+
+    /* Legacy aliases */
+    --accent-cyan: var(--statcast-cyan);
+    --accent-gold: var(--velocity-amber);
+    --accent-green: var(--ball-green);
+    --accent-red: var(--strike-red);
+    --accent-violet: var(--laser-violet);
+
+    /* 4. Text Contrast Hierarchy (WCAG AAA) */
+    --text-primary: #F8FAFC;
+    --text-secondary: #94A3B8;
+    --text-muted: #64748B;
+
+    /* 5. Typography Stacks */
+    --font-ui: "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", "Geist Mono", Menlo, Consolas, monospace;
+}
+
+/* ==========================================================================
+   Root Typography & Antialiasing
+   ========================================================================== */
+html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    scroll-behavior: smooth;
+    background-color: var(--pitch-black);
+    color: var(--text-primary);
+}
+
+body {
+    background-color: var(--pitch-black);
+    color: var(--text-primary);
+    font-family: var(--font-ui);
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    min-height: 100vh;
+    overflow-x: hidden;
+}
+
+/* Display & Heading Tight Tracking (Linear / Raycast Style) */
+h1, h2, h3, .type-display {
+    letter-spacing: -0.025em;
+}
+
+/* Precision Micro Badges */
+.badge-tech {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    line-height: 1;
+}
+
+/* ==========================================================================
+   Tabular Numerals for Jitter-Free Real-Time Telemetry
+   ========================================================================== */
+.tabular-nums,
+[data-telemetry],
+#heroVelocityVal,
+#heroVelocityKmh,
+#heroVelocityPm,
+#plateVelocityVal,
+#plateVelocityKmh,
+#flightTimeVal,
+#vertBreakVal,
+#horzBreakVal,
+#zoneXVal,
+#zoneYVal,
+#zoneWVal,
+#zoneHVal,
+#currentTimeDisplay,
+#durationDisplay,
+#scoreCount,
+#scoreInningLabel,
+#trimStartVal,
+#trimEndVal,
+#teaserVelocityVal,
+#teaserPlateVal,
+#teaserDragVal {
+    font-family: var(--font-mono) !important;
+    font-variant-numeric: tabular-nums !important;
+    font-feature-settings: "tnum" 1, "zero" 1 !important;
+}
+
+/* ==========================================================================
+   Concentric Radius Architecture (Optical Coherence)
+   Outer Radius = Inner Radius + Padding (14px = 6px + 8px)
+   ========================================================================== */
+.card-outer {
+    border-radius: 14px;
+    padding: 14px;
+    background: var(--pitch-card);
+    border: 1px solid var(--border-subtle);
+    box-shadow: var(--specular-top), 0 8px 28px -4px rgba(0, 0, 0, 0.55);
+}
+
+.card-inner {
+    border-radius: 8px;
+    padding: 10px;
+    background: var(--pitch-card-inner);
+    border: 1px solid var(--border-subtle);
+}
+
+/* ==========================================================================
+   Glassmorphic Broadcast Surfaces & Floating Docks
+   ========================================================================== */
+.glass-panel {
+    background: var(--pitch-card);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid var(--border-subtle);
+    box-shadow: var(--specular-top), 0 8px 32px 0 rgba(0, 0, 0, 0.6);
+}
+
+.glass-pill {
+    background: rgba(12, 15, 21, 0.90);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid var(--border-pro);
+    box-shadow: var(--specular-top), 0 6px 24px rgba(0, 0, 0, 0.5);
+}
+
+/* ==========================================================================
+   Tactile Interactive Controls (Hardware Feeling)
+   ========================================================================== */
+button, .btn-tactile, .btn-pro {
+    transition-property: transform, background-color, border-color, box-shadow, color;
+    transition-duration: 110ms;
+    transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+    will-change: transform;
+}
+
+button:active, .btn-tactile:active, .btn-pro:active {
+    transform: scale(0.97);
+}
+
+button:focus-visible, .btn-tactile:focus-visible, input:focus-visible {
+    outline: 2px solid var(--statcast-cyan);
+    outline-offset: 2px;
+}
+
+/* ==========================================================================
+   Video Viewport & Stage
+   ========================================================================== */
+.video-viewport-wrapper {
+    position: relative;
+    background: #000000;
+    border: 1px solid var(--border-pro);
+    box-shadow: 0 16px 48px -4px rgba(0, 0, 0, 0.8);
+    border-radius: 14px;
+    overflow: hidden;
+}
+
+/* ==========================================================================
+   Interactive ABS Strike Zone Box (MLB Specification 3x3 Radar)
+   ========================================================================== */
+.zone-canvas-box {
+    position: absolute;
+    border: 2px solid var(--statcast-cyan);
+    background: var(--statcast-cyan-dim);
+    box-shadow: 0 0 20px rgba(0, 229, 255, 0.20), inset 0 0 12px rgba(0, 229, 255, 0.08);
+    cursor: grab;
+    z-index: 25;
+    user-select: none;
+    transition-property: border-color, background-color, box-shadow;
+    transition-duration: 120ms;
+}
+
+.zone-canvas-box:active {
+    cursor: grabbing;
+}
+
+.zone-canvas-box.is-strike {
+    border-color: var(--ball-green);
+    background: var(--ball-green-dim);
+    box-shadow: 0 0 20px rgba(0, 230, 118, 0.28);
+}
+
+.zone-canvas-box.is-ball {
+    border-color: var(--strike-red);
+    background: var(--strike-red-dim);
+    box-shadow: 0 0 20px rgba(255, 59, 83, 0.28);
+}
+
+/* Strike Zone Resize Corner Anchors (44px hit-box via pseudo-element) */
+.zone-anchor {
+    position: absolute;
+    width: 12px;
+    height: 12px;
+    background: #FFFFFF;
+    border: 2px solid var(--statcast-cyan);
+    border-radius: 50%;
+    box-shadow: 0 0 6px rgba(0, 0, 0, 0.9);
+    transition-property: transform, background-color;
+    transition-duration: 110ms;
+}
+
+/* Invisible 44x44px touch target */
+.zone-anchor::after {
+    content: '';
+    position: absolute;
+    top: -16px;
+    left: -16px;
+    width: 44px;
+    height: 44px;
+}
+
+.zone-anchor:hover {
+    transform: scale(1.35);
+    background: var(--statcast-cyan);
+}
+
+#anchorNW { top: -6px; left: -6px; cursor: nwse-resize; }
+#anchorNE { top: -6px; right: -6px; cursor: nesw-resize; }
+#anchorSW { bottom: -6px; left: -6px; cursor: nesw-resize; }
+#anchorSE { bottom: -6px; right: -6px; cursor: nwse-resize; }
+
+/* ==========================================================================
+   Dynamic Glow Accents
+   ========================================================================== */
+.glow-cyan {
+    box-shadow: 0 0 16px rgba(0, 229, 255, 0.30);
+}
+
+.glow-emerald {
+    box-shadow: 0 0 16px rgba(0, 230, 118, 0.30);
+}
+
+.glow-red {
+    box-shadow: 0 0 16px rgba(255, 59, 83, 0.30);
+}
+
+/* ==========================================================================
+   Base Runner Diamond States (SVG Scorebook)
+   ========================================================================== */
+.base-occupied {
+    fill: var(--statcast-cyan) !important;
+    stroke: #FFFFFF !important;
+    filter: drop-shadow(0 0 5px rgba(0, 229, 255, 0.8));
+    transition: fill 150ms ease, filter 150ms ease;
+}
+
+.base-empty {
+    fill: rgba(255, 255, 255, 0.12) !important;
+    stroke: rgba(255, 255, 255, 0.25) !important;
+    transition: fill 150ms ease;
+}
+
+/* ==========================================================================
+   Professional Range Scrubber (Linear / TrackMan Style)
+   ========================================================================== */
+input[type=range] {
+    -webkit-appearance: none;
+    appearance: none;
+    background: transparent;
+    height: 28px;
+}
+
+input[type=range]:focus {
+    outline: none;
+}
+
+input[type=range]::-webkit-slider-runnable-track {
+    height: 4px;
+    background: rgba(255, 255, 255, 0.12);
+    border-radius: 2px;
+    transition: background-color 120ms ease;
+}
+
+input[type=range]:hover::-webkit-slider-runnable-track {
+    background: rgba(255, 255, 255, 0.20);
+}
+
+input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 14px;
+    width: 14px;
+    border-radius: 50%;
+    background: var(--statcast-cyan);
+    cursor: pointer;
+    margin-top: -5px;
+    box-shadow: 0 0 10px rgba(0, 229, 255, 0.7), 0 0 0 2px rgba(0, 0, 0, 0.6);
+    transition: transform 90ms ease;
+}
+
+input[type=range]::-webkit-slider-thumb:hover {
+    transform: scale(1.25);
+}
+
+/* ==========================================================================
+   Subtle Studio Scrollbars (Minimalist 5px)
+   ========================================================================== */
+* {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
+}
+
+::-webkit-scrollbar {
+    width: 5px;
+    height: 5px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.12);
+    border-radius: 9999px;
+    transition: background-color 150ms ease;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.25);
+}
+
+::-webkit-scrollbar-thumb:active {
+    background: var(--statcast-cyan);
+}
+
+/* Pulse Animation for Hardware Status */
+@keyframes pulse-dot {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.30; transform: scale(0.85); }
+}
+
+.animate-pulse-dot {
+    animation: pulse-dot 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
